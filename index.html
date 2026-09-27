@@ -143,9 +143,17 @@ h3{margin:18px 0 8px;font-size:1rem}
 .matchgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .tile{border:1px solid var(--line);background:var(--card);color:var(--ink);padding:14px 12px;border-radius:12px;font-weight:700;min-height:64px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:.92rem}
 .tile:hover{border-color:var(--brand)}
-.tile.sel{border-color:var(--brand);background:var(--soft);box-shadow:0 0 0 2px var(--brand) inset}
-.tile.done{opacity:.32;pointer-events:none}
-.tile.miss{border-color:var(--bad);animation:shake .3s}
+.tile.sel{border-color:var(--brand);background:#e4e8ff;box-shadow:0 0 0 3px var(--brand) inset;transform:translateY(-2px)}
+@media (prefers-color-scheme: dark){ .tile.sel{background:#242c58} }
+.tile.done{opacity:.3;pointer-events:none}
+.tile.hit{animation:hitpop .32s}
+@keyframes hitpop{50%{transform:scale(1.05)}}
+.tile.wrong{border-color:var(--bad);animation:wrongfade .64s forwards}
+@keyframes wrongfade{
+  0%{background:rgba(220,38,38,.26);border-color:var(--bad);transform:translateY(-2px) scale(.98)}
+  70%{background:rgba(220,38,38,.10);border-color:var(--bad)}
+  100%{background:var(--card);border-color:var(--line);transform:none}
+}
 .timer{font-variant-numeric:tabular-nums;font-weight:800}
 
 /* ---------- list ---------- */
@@ -222,6 +230,7 @@ html,body{ overflow-x:hidden }
       <span class="pill">✓ Unlimited scrolling</span>
       <span class="pill">✓ All modes unlocked</span>
       <span class="pill" id="countPill">— terms</span>
+      <span class="pill" id="progressPill">⭐ 0 · ✓ 0</span>
     </div>
   </div>
 </header>
@@ -426,7 +435,15 @@ function load(){
   s.settings.random = Object.assign({}, RAND_DEFAULTS, s.settings.random || {});
   return s;
 }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
+let storageOK = true;
+function save(){
+  try{ localStorage.setItem(KEY, JSON.stringify(state)); storageOK = true; }
+  catch(e){ storageOK = false; }
+}
+function storageAvailable(){
+  try{ const k = "__storagetest__"; localStorage.setItem(k, "1"); localStorage.removeItem(k); return true; }
+  catch(e){ return false; }
+}
 function randOn(m){ return state.settings.random[m] !== false; }
 function toggleRand(m){ state.settings.random[m] = !randOn(m); save(); }
 
@@ -435,15 +452,19 @@ const knownSet   = () => new Set(state.known);
 
 function toggleStar(term){
   const s = starredSet();
-  s.has(term) ? s.delete(term) : s.add(term);
+  const wasStarred = s.has(term);
+  wasStarred ? s.delete(term) : s.add(term);
   state.starred = [...s]; save();
   if(mode === "starred" && !starredSet().size) mode = "list";
   render();
+  toast(wasStarred ? "Removed from favourites" : "⭐ Starred — saved on this device");
 }
 function toggleKnown(term){
   const s = knownSet();
-  s.has(term) ? s.delete(term) : s.add(term);
+  const wasKnown = s.has(term);
+  wasKnown ? s.delete(term) : s.add(term);
   state.known = [...s]; save(); render();
+  toast(wasKnown ? "Marked as not learned" : "✓ Marked known — saved on this device");
 }
 
 /* helpers */
@@ -456,6 +477,124 @@ let toastTimer=null;
 function toast(msg){
   const el = $("#toast"); el.textContent = msg; el.classList.add("show");
   clearTimeout(toastTimer); toastTimer = setTimeout(()=>el.classList.remove("show"), 1600);
+}
+
+/* ---------------------------------------------------------
+   Smart distractors: wrong options that mean something similar
+   --------------------------------------------------------- */
+const STOPWORDS = new Set(("a an the to of in on at for from by with and or is are was were be been being that this it its as you your someone something person people who which what when where how not no other others one two into out up down their they them his her him our us we do does did done make makes making give gives giving take takes taking have has had get gets getting use used using more most very much many some any can could will would should may might must about after before over under again then than there here also especially usually typically etc someone's person's").split(" "));
+function stemWord(w){
+  w = w.toLowerCase();
+  if(w.length > 4){
+    if(w.endsWith("ies")) return w.slice(0,-3)+"y";
+    if(w.endsWith("ing")) return w.slice(0,-3);
+    if(w.endsWith("ed"))  return w.slice(0,-2);
+    if(w.endsWith("er"))  return w.slice(0,-2);
+    if(w.endsWith("or"))  return w.slice(0,-2);
+    if(w.endsWith("ion")) return w.slice(0,-3);
+    if(w.endsWith("s"))   return w.slice(0,-1);
+  }
+  return w;
+}
+function sigOf(text){
+  const clean = String(text).replace(/\([^)]*\)/g, " ");
+  return [...new Set(clean.split(/[^A-Za-z]+/).filter(w => w.length > 2 && !STOPWORDS.has(w.toLowerCase())).map(stemWord))];
+}
+/* [fine-grained group, family, matching rule] — first match wins */
+const CATEGORIES = [
+  ["arson",     "violent",   /\barson|set fire/],
+  ["kidnap",    "violent",   /kidnap|abduct|ransom|hostage/],
+  ["hijack",    "violent",   /hijack/],
+  ["terror",    "violent",   /terror/],
+  ["victim",    "justice",   /\bvictim/],
+  ["weapon",    "object",    /\bweapon|to cause injury/],
+  ["murder",    "violent",   /murder|assassin|\bkill/],
+  ["drugs",     "drugs",     /traffick|narcotic|\bdrugs?\b/],
+  ["blackmail", "deception", /blackmail/],
+  ["bribery",   "deception", /brib/],
+  ["forgery",   "deception", /forg|counterfeit|fake copies/],
+  ["fraud",     "deception", /fraud|conman|deceiv|cheat/],
+  ["shoplift",  "property",  /shoplift/],
+  ["pickpocket","property",  /pickpocket|pick somebody|pockets or purses/],
+  ["burglary",  "property",  /burgl/],
+  ["mugging",   "property",  /\bmug/],
+  ["joyride",   "property",  /joyrid/],
+  ["robbery",   "property",  /rob(b|ber|bery)|\brob\b/],
+  ["theft",     "property",  /theft|thief|\bsteal|stolen/],
+  ["breakverbs","property",  /break (in|into|off|out|up)/],
+  ["vandalism", "property",  /vandal|hooligan|damag/],
+  ["litter",    "property",  /litter|rubbish/],
+  ["punishment","punish",    /imprison|prison|sentence|\bfine|community service|warning|behind bars|do time|punish/],
+  ["court",     "justice",   /\bcourt|trial|judge|jury|prosecut|defen[cs]|lawyer|convict|guilty|innocent|accused|defendant|evidence|proof|witness|suspect|charge|arrest|fingerprint|accomplice|perpetrator|investigat|prove|deny/],
+  ["police",    "justice",   /police|\breport\b|identify|point out|crime prevention/],
+  ["law",       "justice",   /\blaw\b|parliament/],
+  ["phrase",    "phrase",    /red-handed|in cold blood|at large|on the alert|either die young/],
+  ["traits",    "traits",    /nosy|sensible|plain|watchful/],
+  ["degree",    "degree",    /\bpetty\b|\bminor\b|\bmajor\b|\bviolent\b|\bserious\b/],
+  ["behaviour", "behaviour", /misbehav|mistreat|disrespect|dishonest|disagree|praise|scrawl|acceptable/],
+  ["mind",      "mind",      /reflect|disbelief|make a choice/],
+  ["social",    "social",    /council estate|misfortune|hierarchy|identity|rival|revenge|make a living|mentor|struggle to pay/],
+  ["prevention","prevent",   /precaution|prevent|security|open invitation|keep an eye|attention|burglar-friendly/],
+  ["object",    "object",    /vehicle|possession|property|valuable|rusty/],
+  ["general",   "general",   /commit a crime|offence|\bcriminal\b|\bcrime\b/]
+];
+function classifyText(h){
+  for(const [fine, fam, re] of CATEGORIES){ if(re.test(h)) return { fine, fam }; }
+  return { fine:"misc", fam:"misc" };
+}
+let INFO = [];
+function buildInfo(){
+  INFO = TERMS.map(t => {
+    const c = classifyText((t.t + " " + t.d).toLowerCase().replace(/\([^)]*\)/g, " "));
+    return { cat:c.fine, fam:c.fam, wt:new Set(sigOf(t.t)), wd:new Set(sigOf(t.d)) };
+  });
+}
+function optionText(i, key){ return key === "t" ? TERMS[i].t : TERMS[i].d; }
+function optionScore(a, b, key){
+  const A = INFO[a], B = INFO[b];
+  if(!A || !B) return Math.random();
+  const wa = key === "t" ? A.wt : A.wd, wb = key === "t" ? B.wt : B.wd;
+  let s = 0;
+  if(A.cat === B.cat) s += 6; else if(A.fam === B.fam) s += 3;
+  let ov = 0; wb.forEach(w => { if(wa.has(w)) ov++; });
+  s += 2 * Math.min(ov, 4);
+  if(optionText(a,key).split(" ")[0].toLowerCase() === optionText(b,key).split(" ")[0].toLowerCase()) s += 1;
+  return s + Math.random() * 0.9;      // small random tie-break so options vary
+}
+function sameMeaning(a, b){
+  const strip = s => String(s).replace(/\([^)]*\)/g, " ");   // ignore the Lithuanian in brackets
+  const A = norm(strip(a)), B = norm(strip(b));
+  if(A === B) return true;
+  const toks = s => [...new Set(s.split(" ").filter(w => w.length > 1))];
+  const ta = toks(A), tb = toks(B);
+  if(ta.slice().sort().join(" ") === tb.slice().sort().join(" ")) return true;   // same words, different order
+  if(ta.length >= 4 && tb.length >= 4){                                          // long text = usually a definition
+    const sa = new Set(ta), sb = new Set(tb);
+    if(ta.every(w => sb.has(w)) || tb.every(w => sa.has(w))) return true;        // one is a near-copy of the other
+  }
+  return false;
+}
+function topSimilar(correctIdx, key, n){
+  const correctText = optionText(correctIdx, key);
+  return TERMS.map((_, i) => i)
+    .filter(i => i !== correctIdx && !sameMeaning(optionText(i, key), correctText))
+    .map(i => ({ i, s: optionScore(correctIdx, i, key) }))
+    .sort((x, y) => y.s - x.s)
+    .slice(0, Math.max(n, 1))
+    .map(o => o.i);
+}
+function pickOptions(correctIdx, key, n){
+  const correctText = optionText(correctIdx, key);
+  const scored = TERMS.map((_, i) => i)
+    .filter(i => i !== correctIdx && !sameMeaning(optionText(i, key), correctText))
+    .map(i => ({ i, s: optionScore(correctIdx, i, key) }))
+    .sort((x, y) => y.s - x.s);
+  const A = INFO[correctIdx] || {};
+  let pool = scored.filter(o => INFO[o.i] && INFO[o.i].cat === A.cat);                    // same exact group
+  if(pool.length < n) pool = scored.filter(o => INFO[o.i] && INFO[o.i].fam === A.fam);    // same broad family
+  if(pool.length < n) pool = scored;                                                     // last resort
+  const chosen = shuffle(pool.slice(0, Math.max(n + 3, 6))).map(o => o.i).slice(0, n);   // shuffle for variety
+  return shuffle([correctIdx, ...chosen]);
 }
 
 /* ---------------------------------------------------------
@@ -516,6 +655,7 @@ function tone(freq, dur, type, vol, delay){
   o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur + 0.03);
 }
 function sndWrong(){ tone(170,0.20,"sawtooth",0.05); tone(115,0.24,"sawtooth",0.04,0.05); }
+function sndPick(){ tone(520,0.06,"sine",0.035); }
 function sndRight(){ tone(880,0.10,"sine",0.05); tone(1320,0.13,"sine",0.04,0.07); }
 
 function effectWrong(){
@@ -560,6 +700,8 @@ function setMode(m){
 }
 function render(){
   $("#countPill").textContent = TERMS.length + " terms";
+  const pPill = $("#progressPill");
+  if(pPill) pPill.textContent = "⭐ " + starredSet().size + " · ✓ " + knownSet().size;
   if(mode === "starred" && !starredSet().size) mode = "list";
   updateTabs();
   const view = $("#view");
@@ -684,9 +826,7 @@ function nextLearnQ(){
   learn.current = idx;
   learn.askTerm = randOn("learn") ? Math.random() < 0.5 : (learn.order.indexOf(idx) % 2 === 0);
   const key = learn.askTerm ? "t" : "d";
-  const correctText = TERMS[idx][key];
-  const others = shuffle(TERMS.map((_,i)=>i).filter(i => i!==idx && TERMS[i][key]!==correctText)).slice(0,3);
-  learn.options = shuffle([idx, ...others]);
+  learn.options = pickOptions(idx, key, 3);   // wrong options now mean something similar
   learn.written = (learn.scores[idx]||0) >= 1;
 }
 function renderLearn(){
@@ -857,18 +997,18 @@ function makeQuestion(idx, types, side){
   }
   if(type==="tf"){
     const askTerm = side==="term";
-    const wrong = Math.random()<0.5;
-    let defIdx = idx;
-    if(wrong){ const others = TERMS.map((_,i)=>i).filter(i=>i!==idx); defIdx = others[Math.floor(Math.random()*others.length)]; }
-    const statement = askTerm ? `${term.t} — ${TERMS[defIdx].d}` : `${TERMS[defIdx].t} — ${term.d}`;
-    return { idx, kind:"tf", prompt:statement, answer: wrong?"False":"True" };
+    let mixIdx = idx, isFalse = false;
+    if(Math.random() < 0.5){
+      const near = topSimilar(idx, askTerm ? "d" : "t", 8);   // plausible-looking mix-up
+      if(near.length){ mixIdx = near[Math.floor(Math.random()*near.length)]; isFalse = true; }
+    }
+    const statement = askTerm ? `${term.t} — ${TERMS[mixIdx].d}` : `${TERMS[mixIdx].t} — ${term.d}`;
+    return { idx, kind:"tf", prompt:statement, answer: isFalse ? "False" : "True" };
   }
   const askTerm = (type==="def2term");
   const key = askTerm ? "t" : "d";
-  const correctText = term[key];
-  const others = shuffle(TERMS.map((_,i)=>i).filter(i=>i!==idx && TERMS[i][key]!==correctText)).slice(0,3);
-  return { idx, kind:"mc", askTerm, prompt: askTerm? term.d : term.t, answer: correctText,
-           options: shuffle([idx, ...others]), optionKey: key };
+  return { idx, kind:"mc", askTerm, prompt: askTerm? term.d : term.t, answer: term[key],
+           options: pickOptions(idx, key, 3), optionKey: key };
 }
 function testQuestionHTML(){
   const q = test.qs[test.i];
@@ -1032,32 +1172,65 @@ function newMatch(){
     tiles.push({id:k, side:"t", text:TERMS[i].t, done:false, sel:false});
     tiles.push({id:k, side:"d", text:TERMS[i].d, done:false, sel:false});
   });
-  match = { pairs:n, tiles: shuffle(tiles), sel:null, matched:0, start:Date.now(), done:false };
+  match = { pairs:n, tiles: shuffle(tiles), sel:null, matched:0, start:Date.now(), done:false, busy:false };
+}
+function tileEl(id, side){ return document.querySelector('.tile[data-id="' + id + '"][data-side="' + side + '"]'); }
+function updateMatchProgress(){
+  const pct = (match.matched/match.pairs)*100;
+  const bar = document.querySelector("#view .progress > i"); if(bar) bar.style.width = pct + "%";
+  const meta = document.querySelector("#view .meta span"); if(meta) meta.textContent = match.matched + " / " + match.pairs + " pairs";
+}
+function finishMatch(){
+  const t = (Date.now()-match.start)/1000;
+  match.done = true; match.time = t;
+  if(state.bestMatch===null || t < state.bestMatch){ state.bestMatch = t; save(); }
+  clearInterval(matchTick);
+  setTimeout(()=>{ if(match && match.done) render(); }, 280);
 }
 function bindMatch(){
   if(!match){ $("#matchStart").addEventListener("click", ()=>{ newMatch(); render(); }); return; }
-  if(match.done){ $("#matchRestart").addEventListener("click", ()=>{ newMatch(); render(); }); return; }
+  $("#matchRestart").addEventListener("click", ()=>{ newMatch(); render(); });   // works while playing AND when finished
+  if(match.done) return;
   $("#randToggle").addEventListener("click", ()=>{ toggleRand("match"); newMatch(); render(); });
   document.querySelectorAll(".tile").forEach(btn=>{
     btn.addEventListener("click", ()=>{
+      if(btn.classList.contains("done") || match.busy || match.done) return;
       const id = +btn.dataset.id, side = btn.dataset.side;
-      if(btn.classList.contains("done")) return;
-      if(!match.sel){ match.sel = {id, side}; }
-      else if(match.sel.id===id && match.sel.side===side){ match.sel = null; }
-      else if(match.sel.id===id && match.sel.side!==side){
-        match.tiles.forEach(t=>{ if(t.id===id) t.done=true; });
-        match.matched++; match.sel = null;
-        if(match.matched===match.pairs){
-          const t = (Date.now()-match.start)/1000;
-          match.done = true; match.time = t;
-          if(state.bestMatch===null || t < state.bestMatch){ state.bestMatch = t; save(); }
-          render(); return;
-        }
-      } else {
-        match.sel = null; btn.classList.add("miss"); effectWrong();
-        setTimeout(()=>btn.classList.remove("miss"), 320);
+
+      // first pick -> show it as selected
+      if(!match.sel){
+        match.sel = {id, side};
+        btn.classList.add("sel");
+        sndPick();
+        return;
       }
-      render();
+      // tapping the same tile again -> clear the selection
+      if(match.sel.id===id && match.sel.side===side){
+        btn.classList.remove("sel");
+        match.sel = null;
+        return;
+      }
+      // matching pair
+      if(match.sel.id===id){
+        const first = tileEl(match.sel.id, match.sel.side);
+        [first, btn].forEach(t=>{ if(t){ t.classList.remove("sel"); t.classList.add("done","hit"); } });
+        match.matched++; match.sel = null;
+        updateMatchProgress(); effectRight();
+        if(match.matched===match.pairs) finishMatch();
+        return;
+      }
+      // wrong pair -> show the second pick, then fade the selection out
+      const first = tileEl(match.sel.id, match.sel.side);
+      btn.classList.add("sel");
+      match.busy = true;
+      requestAnimationFrame(()=>{
+        [first, btn].forEach(t=>{ if(t) t.classList.add("wrong"); });
+        sndWrong();
+      });
+      setTimeout(()=>{
+        [first, btn].forEach(t=>{ if(t) t.classList.remove("sel","wrong"); });
+        match.sel = null; match.busy = false;
+      }, 640);
     });
   });
   clearInterval(matchTick);
@@ -1226,7 +1399,7 @@ function renderStarred(){
   </div>`;
 }
 function bindStarred(){
-  document.querySelectorAll("[data-unstar]").forEach(b=>b.addEventListener("click", ()=>{ toggleStar(b.dataset.unstar); toast("Removed from starred"); }));
+  document.querySelectorAll("[data-unstar]").forEach(b=>b.addEventListener("click", ()=>toggleStar(b.dataset.unstar)));
   document.querySelectorAll("[data-speak]").forEach(b=>b.addEventListener("click", ()=>speak(b.dataset.speak)));
 }
 
@@ -1236,7 +1409,11 @@ function bindStarred(){
 if(state.custom && Array.isArray(state.custom) && state.custom.length){
   TERMS = state.custom.map(x=>({t:x.t, d:x.d, e:x.e||""}));
 }
+buildInfo();
 render();
+if(!storageAvailable()){
+  setTimeout(()=>toast("Heads up: this browser is blocking saved progress"), 700);
+}
 </script>
 </body>
 </html>
